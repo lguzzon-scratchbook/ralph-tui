@@ -194,7 +194,7 @@ export function TabBar({
         {tabs.length === 0 ? (
           <box style={{ paddingLeft: 1 }}>
             <text fg={colors.fg.dim}>
-              No remotes configured. Press R to manage remotes.
+              No remotes configured. Press A to add a remote.
             </text>
           </box>
         ) : (

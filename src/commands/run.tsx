@@ -2230,7 +2230,14 @@ async function runRemoteOnlyTui(args: {
   let showDialogCallback: (() => void) | null = null;
   let hideDialogCallback: (() => void) | null = null;
   let cancelledCallback: (() => void) | null = null;
-  let resolveQuitPromise: (() => void) | null = null;
+
+  // Create the quit Promise up front and capture its resolver before installing
+  // any listeners. This avoids a race where SIGTERM (or any other shutdown path)
+  // fires before `await new Promise(...)` runs and the resolver is still unset.
+  let resolveQuitPromise: () => void = () => {};
+  const quitPromise = new Promise<void>((resolve) => {
+    resolveQuitPromise = resolve;
+  });
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -2249,7 +2256,7 @@ async function runRemoteOnlyTui(args: {
     } catch {
       // Ensure quit promise still resolves when cleanup fails.
     }
-    resolveQuitPromise?.();
+    resolveQuitPromise();
   };
 
   const forceQuit = (): void => {
@@ -2296,9 +2303,7 @@ async function runRemoteOnlyTui(args: {
     if (handler._cancelled) cancelledCallback = handler._cancelled;
   }, 10);
 
-  await new Promise<void>((resolve) => {
-    resolveQuitPromise = resolve;
-  });
+  await quitPromise;
 
   clearInterval(checkCallbacks);
   process.removeListener('SIGTERM', gracefulShutdown);

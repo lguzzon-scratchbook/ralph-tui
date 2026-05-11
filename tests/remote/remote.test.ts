@@ -667,6 +667,28 @@ describe('InstanceManager', () => {
       const tabs = manager.getTabs();
       expect(tabs.some((t) => t.isLocal)).toBe(false);
     });
+
+    test('navigation helpers are safe with zero tabs', async () => {
+      const { InstanceManager } = await import('../../src/remote/instance-manager.js');
+      // Skip initialize() so we don't pull in real remotes from the dev/CI
+      // environment — the construction-time tab list is empty, which is what
+      // we want to validate (matches the remote-only + zero-remotes runtime case).
+      const manager = new InstanceManager({ remoteOnly: true });
+
+      expect(manager.getTabs()).toHaveLength(0);
+      const initialIndex = manager.getSelectedIndex();
+
+      // None of these should throw or move the selected index off the rails.
+      await expect(manager.selectNextTab()).resolves.toBeUndefined();
+      await expect(manager.selectPreviousTab()).resolves.toBeUndefined();
+      await expect(manager.selectTab(Number.NaN)).resolves.toBeUndefined();
+      await expect(manager.selectTab(-1)).resolves.toBeUndefined();
+      await expect(manager.selectTab(10)).resolves.toBeUndefined();
+      await expect(manager.selectTab(1.5)).resolves.toBeUndefined();
+
+      expect(manager.getSelectedIndex()).toBe(initialIndex);
+      expect(manager.getSelectedTab()).toBeUndefined();
+    });
   });
 
   describe('Remote Management Methods', () => {

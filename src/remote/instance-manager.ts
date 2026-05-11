@@ -144,14 +144,22 @@ export class InstanceManager {
   /**
    * Select a tab by index.
    * If the tab is disconnected, initiates a reconnection.
+   * Defensively rejects non-integer indices (e.g., NaN from `% 0`)
+   * and out-of-range values, returning without side effects.
    */
   async selectTab(index: number): Promise<void> {
+    if (!Number.isInteger(index)) {
+      return;
+    }
     if (index < 0 || index >= this.tabs.length) {
       return;
     }
 
     this.selectedIndex = index;
     const tab = this.tabs[index];
+    if (!tab) {
+      return;
+    }
 
     // Reconnect if disconnected (per acceptance criteria: no auto-reconnect, only on selection)
     if (!tab.isLocal && tab.status === 'disconnected') {
@@ -162,17 +170,21 @@ export class InstanceManager {
   }
 
   /**
-   * Select the next tab (wraps around)
+   * Select the next tab (wraps around).
+   * No-op when there are no tabs (avoids `% 0 === NaN` reaching selectTab).
    */
   async selectNextTab(): Promise<void> {
+    if (this.tabs.length === 0) return;
     const nextIndex = (this.selectedIndex + 1) % this.tabs.length;
     await this.selectTab(nextIndex);
   }
 
   /**
-   * Select the previous tab (wraps around)
+   * Select the previous tab (wraps around).
+   * No-op when there are no tabs.
    */
   async selectPreviousTab(): Promise<void> {
+    if (this.tabs.length === 0) return;
     const prevIndex = (this.selectedIndex - 1 + this.tabs.length) % this.tabs.length;
     await this.selectTab(prevIndex);
   }

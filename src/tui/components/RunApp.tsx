@@ -2693,9 +2693,13 @@ export function RunApp({
 
   useKeyboard(handleKeyboard);
 
-  // Calculate layout - account for dashboard and tab bar height when visible
+  // Calculate layout - account for dashboard and tab bar height when visible.
+  // Show the TabBar whenever there's something useful to display: any remote tab,
+  // multiple tabs, or zero tabs in remote-only mode (so the empty-state hint shows).
+  // Hide it only when the single tab is the local tab (original behavior).
+  const shouldShowTabBar = !!instanceTabs && !(instanceTabs.length === 1 && instanceTabs[0]?.isLocal);
   const dashboardHeight = showDashboard ? layout.progressDashboard.height : 0;
-  const tabBarHeight = instanceTabs && instanceTabs.length > 1 ? layout.tabBar.height : 0;
+  const tabBarHeight = shouldShowTabBar ? layout.tabBar.height : 0;
   const contentHeight = Math.max(
     1,
     height - layout.header.height - layout.footer.height - dashboardHeight - tabBarHeight
@@ -3402,10 +3406,12 @@ export function RunApp({
         backgroundColor: colors.bg.primary,
       }}
     >
-      {/* Tab Bar - instance navigation (local + remotes) */}
-      {instanceTabs && instanceTabs.length > 1 && (
+      {/* Tab Bar - instance navigation (local + remotes).
+          Visible whenever there are remotes (or zero tabs in remote-only mode);
+          hidden only for the default "just the local tab" case. */}
+      {shouldShowTabBar && (
         <TabBar
-          tabs={instanceTabs}
+          tabs={instanceTabs!}
           selectedIndex={selectedTabIndex}
         />
       )}
