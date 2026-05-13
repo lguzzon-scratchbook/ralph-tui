@@ -64,11 +64,15 @@ describe('session persistence multi-epic metadata', () => {
 
     await savePersistedSession(state);
     const loaded = await loadPersistedSession(cwd);
+    expect(loaded).not.toBeNull();
+    if (!loaded) {
+      throw new Error('Expected persisted session to load');
+    }
 
-    expect(loaded?.trackerState.epicIds).toEqual(['ui-epic', 'backend-epic']);
-    expect(loaded?.trackerState.executionScopes).toEqual(executionScopes);
+    expect(loaded.trackerState.epicIds).toEqual(['ui-epic', 'backend-epic']);
+    expect(loaded.trackerState.executionScopes).toEqual(executionScopes);
 
-    const summary = getSessionSummary(loaded!);
+    const summary = getSessionSummary(loaded);
     expect(summary.epicId).toBe('ui-epic');
     expect(summary.epicIds).toEqual(['ui-epic', 'backend-epic']);
     expect(summary.executionScopes).toEqual(executionScopes);
