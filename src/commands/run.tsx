@@ -1637,11 +1637,15 @@ async function showEpicSelectionTui(
     });
 
     const root = createRoot(renderer);
-    let handleSigint = () => {};
 
     const cleanup = () => {
       process.off('SIGINT', handleSigint);
       renderer.destroy();
+    };
+
+    const handleSigint = () => {
+      cleanup();
+      resolve(undefined);
     };
 
     const handleEpicSelected = (epics: TrackerTask[]) => {
@@ -1650,12 +1654,6 @@ async function showEpicSelectionTui(
     };
 
     const handleQuit = () => {
-      cleanup();
-      resolve(undefined);
-    };
-
-    // Handle Ctrl+C during epic selection
-    handleSigint = () => {
       cleanup();
       resolve(undefined);
     };
@@ -1672,7 +1670,7 @@ async function showEpicSelectionTui(
   });
 }
 
-async function resolveExecutionScopes(
+export async function resolveExecutionScopes(
   tracker: TrackerPlugin,
   epicIds: string[]
 ): Promise<ExecutionScope[]> {
@@ -1683,7 +1681,8 @@ async function resolveExecutionScopes(
   let epics: TrackerTask[] = [];
   try {
     epics = await tracker.getEpics();
-  } catch {
+  } catch (error) {
+    console.error('Failed to resolve epics from tracker; using synthetic execution scopes:', error);
     epics = [];
   }
 
@@ -3666,6 +3665,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
   let executionScopes: ExecutionScope[] = [];
   let trackerForRun: TrackerPlugin | undefined;
+  const trackerRegistry = getTrackerRegistry();
 
   // If using beads tracker without epic, show epic selection TUI
   const isBeadsTracker = config.tracker.plugin === 'beads' || config.tracker.plugin === 'beads-bv' || config.tracker.plugin === 'beads-rust';
@@ -3673,7 +3673,6 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     console.log('No epic specified. Loading epic selection...');
 
     // Get tracker instance for epic selection
-    const trackerRegistry = getTrackerRegistry();
     const tracker = await trackerRegistry.getInstance(config.tracker);
     trackerForRun = tracker;
 
@@ -3699,12 +3698,6 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
     console.log(`Selected epic${selectedEpics.length > 1 ? 's' : ''}: ${config.epicIds.join(', ')}`);
     console.log('');
-  }
-
-  if (config.epicIds && config.epicIds.length > 0 && executionScopes.length === 0) {
-    const trackerRegistry = getTrackerRegistry();
-    trackerForRun = trackerForRun ?? await trackerRegistry.getInstance(config.tracker);
-    executionScopes = await resolveExecutionScopes(trackerForRun, config.epicIds);
   }
 
   // Detect and recover stale sessions EARLY (before any prompts)
@@ -3776,12 +3769,18 @@ export async function executeRunCommand(args: string[]): Promise<void> {
       executionScopes = session.executionScopes ?? executionScopes;
     }
   } else {
-    // Create new session (task count will be updated after tracker init)
-    // Note: Lock already acquired above, so createSession won't re-acquire
-
     // Clear progress file for fresh start with new epic
     await clearProgress(config.cwd);
+  }
 
+  trackerForRun = trackerForRun ?? await trackerRegistry.getInstance(config.tracker);
+  if (config.epicIds && config.epicIds.length > 0 && executionScopes.length === 0) {
+    executionScopes = await resolveExecutionScopes(trackerForRun, config.epicIds);
+  }
+
+  if (!session) {
+    // Create new session (task count will be updated after tracker init)
+    // Note: Lock already acquired above, so createSession won't re-acquire
     session = await createSession({
       sessionId: newSessionId,
       agentPlugin: config.agent.plugin,
@@ -3814,11 +3813,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
   let tasks: TrackerTask[] = [];
   let tracker: TrackerPlugin;
-  const trackerRegistry = getTrackerRegistry();
-  const baseTracker = trackerForRun ?? await trackerRegistry.getInstance(config.tracker);
-  if (config.epicIds && config.epicIds.length > 0 && executionScopes.length === 0) {
-    executionScopes = await resolveExecutionScopes(baseTracker, config.epicIds);
-  }
+  const baseTracker = trackerForRun;
   tracker = wrapTrackerForScopes(baseTracker, executionScopes);
 
   // Create and initialize engine

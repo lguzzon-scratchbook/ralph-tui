@@ -19,10 +19,11 @@ import {
   buildSequentialSummaryFilePath,
   createSequentialRunSummary,
   formatSequentialRunSummary,
+  resolveExecutionScopes,
   type TaskRangeFilter,
   type ParallelConflictState,
 } from './run.js';
-import type { ExecutionScope, TrackerTask } from '../plugins/trackers/types.js';
+import type { ExecutionScope, TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
 import type {
   FileConflict,
   ConflictResolutionResult,
@@ -42,6 +43,12 @@ function createTasks(count: number): TrackerTask[] {
     status: 'open' as const,
     priority: 2 as const,
   }));
+}
+
+function createTrackerWithEpics(getEpics: () => Promise<TrackerTask[]>): TrackerPlugin {
+  return {
+    getEpics,
+  } as TrackerPlugin;
 }
 
 describe('filterTasksByRange', () => {
@@ -192,6 +199,68 @@ describe('filterTasksByRange', () => {
 
       expect(result.message).toBe('Task range all: 5 of 5 tasks selected');
     });
+  });
+});
+
+describe('resolveExecutionScopes', () => {
+  test('resolves matching tracker epics and falls back per missing epic ID', async () => {
+    const tracker = createTrackerWithEpics(async () => [
+      {
+        id: 'ui-epic',
+        title: 'UI Epic',
+        status: 'open',
+        priority: 1,
+        description: 'Frontend work',
+        metadata: { owner: 'ui' },
+      },
+    ]);
+
+    const scopes = await resolveExecutionScopes(tracker, ['ui-epic', 'backend-epic']);
+
+    expect(scopes).toEqual([
+      {
+        id: 'ui-epic',
+        title: 'UI Epic',
+        type: 'epic',
+        description: 'Frontend work',
+        metadata: { owner: 'ui' },
+      },
+      {
+        id: 'backend-epic',
+        title: 'backend-epic',
+        type: 'epic',
+      },
+    ]);
+  });
+
+  test('logs getEpics failures before using synthetic scopes', async () => {
+    const originalError = console.error;
+    const calls: unknown[][] = [];
+    const error = new Error('tracker unavailable');
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+
+    try {
+      const tracker = createTrackerWithEpics(async () => {
+        throw error;
+      });
+
+      const scopes = await resolveExecutionScopes(tracker, ['ui-epic']);
+
+      expect(scopes).toEqual([
+        {
+          id: 'ui-epic',
+          title: 'ui-epic',
+          type: 'epic',
+        },
+      ]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[0]).toBe('Failed to resolve epics from tracker; using synthetic execution scopes:');
+      expect(calls[0]?.[1]).toBe(error);
+    } finally {
+      console.error = originalError;
+    }
   });
 });
 
