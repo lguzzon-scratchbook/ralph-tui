@@ -190,6 +190,37 @@ describe('filterTasksByRange', () => {
 });
 
 describe('parseRunArgs', () => {
+  describe('--epic/--epics parsing', () => {
+    test('preserves single-epic compatibility', () => {
+      const result = parseRunArgs(['--epic', 'ui-epic']);
+
+      expect(result.epicId).toBe('ui-epic');
+      expect(result.epicIds).toEqual(['ui-epic']);
+    });
+
+    test('parses repeated --epic values in order', () => {
+      const result = parseRunArgs(['--parallel', '--epic', 'ui-epic', '--epic', 'backend-epic']);
+
+      expect(result.parallel).toBe(true);
+      expect(result.epicId).toBe('ui-epic');
+      expect(result.epicIds).toEqual(['ui-epic', 'backend-epic']);
+    });
+
+    test('parses comma-separated --epics values', () => {
+      const result = parseRunArgs(['--epics', 'ui-epic,backend-epic,docs-epic']);
+
+      expect(result.epicId).toBe('ui-epic');
+      expect(result.epicIds).toEqual(['ui-epic', 'backend-epic', 'docs-epic']);
+    });
+
+    test('deduplicates repeated epic IDs', () => {
+      const result = parseRunArgs(['--epic', 'ui-epic', '--epics', 'ui-epic,backend-epic']);
+
+      expect(result.epicId).toBe('ui-epic');
+      expect(result.epicIds).toEqual(['ui-epic', 'backend-epic']);
+    });
+  });
+
   describe('--task-range parsing', () => {
     test('parses full range "1-5"', () => {
       const result = parseRunArgs(['--task-range', '1-5']);

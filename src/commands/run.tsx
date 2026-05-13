@@ -58,9 +58,18 @@ import { registerBuiltinAgents } from '../plugins/agents/builtin/index.js';
 import { registerBuiltinTrackers } from '../plugins/trackers/builtin/index.js';
 import { getAgentRegistry } from '../plugins/agents/registry.js';
 import { getTrackerRegistry } from '../plugins/trackers/registry.js';
+import {
+  MultiScopeTrackerPlugin,
+  createExecutionScopeFromTask,
+} from '../plugins/trackers/multi-scope.js';
 import { RunApp } from '../tui/components/RunApp.js';
 import { EpicSelectionApp } from '../tui/components/EpicSelectionApp.js';
-import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
+import type {
+  ExecutionScope,
+  ScopedTrackerTask,
+  TrackerPlugin,
+  TrackerTask,
+} from '../plugins/trackers/types.js';
 import type { RalphConfig } from '../config/types.js';
 import { projectConfigExists, runSetupWizard, checkAndMigrate } from '../setup/index.js';
 import { createInterruptHandler } from '../interruption/index.js';
@@ -443,6 +452,14 @@ interface ParallelRunSummary {
   originalBranch: string | null;
   returnToOriginalBranchError: string | null;
   preservedRecoveryWorktrees: WorktreeInfo[];
+  scopeSummaries: ParallelScopeSummary[];
+}
+
+interface ParallelScopeSummary {
+  scope: ExecutionScope;
+  totalTasks: number;
+  tasksCompleted: number;
+  tasksFailed: number;
 }
 
 export function buildParallelSummaryFilePath(
@@ -457,6 +474,72 @@ export function buildParallelSummaryFilePath(
     PARALLEL_SUMMARY_DIR,
     `parallel-summary-${safeSessionId}-${safeTimestamp}.txt`
   );
+}
+
+function getTaskExecutionScope(task: TrackerTask): ExecutionScope | undefined {
+  const scopedTask = task as ScopedTrackerTask;
+  if (scopedTask.executionScope) {
+    return scopedTask.executionScope;
+  }
+
+  const metadataScope = task.metadata?.executionScope;
+  if (
+    metadataScope &&
+    typeof metadataScope === 'object' &&
+    'id' in metadataScope &&
+    typeof (metadataScope as { id?: unknown }).id === 'string'
+  ) {
+    const scopeRecord = metadataScope as Record<string, unknown>;
+    const id = scopeRecord.id as string;
+    return {
+      id,
+      title: typeof scopeRecord.title === 'string' ? scopeRecord.title : id,
+      type: scopeRecord.type === 'prd' || scopeRecord.type === 'tracker' ? scopeRecord.type : 'epic',
+      description: typeof scopeRecord.description === 'string' ? scopeRecord.description : undefined,
+    };
+  }
+
+  return undefined;
+}
+
+function buildParallelScopeSummaries(
+  executorState: ParallelExecutorState
+): ParallelScopeSummary[] {
+  const scopes = new Map<string, ExecutionScope>();
+  for (const scope of executorState.scopes ?? []) {
+    scopes.set(scope.id, scope);
+  }
+
+  const totals = new Map<string, number>();
+  for (const node of executorState.taskGraph?.nodes.values() ?? []) {
+    const scope = getTaskExecutionScope(node.task);
+    if (!scope) continue;
+    scopes.set(scope.id, scope);
+    totals.set(scope.id, (totals.get(scope.id) ?? 0) + 1);
+  }
+
+  const completed = new Map<string, number>();
+  const failed = new Map<string, number>();
+  for (const operation of executorState.mergeQueue) {
+    const scope = getTaskExecutionScope(operation.workerResult.task);
+    if (!scope) continue;
+    scopes.set(scope.id, scope);
+
+    if (operation.status === 'completed') {
+      completed.set(scope.id, (completed.get(scope.id) ?? 0) + 1);
+    } else if (operation.status === 'failed' || operation.status === 'rolled-back') {
+      failed.set(scope.id, (failed.get(scope.id) ?? 0) + 1);
+    }
+  }
+
+  return [...scopes.values()]
+    .filter((scope) => (totals.get(scope.id) ?? 0) > 0)
+    .map((scope) => ({
+      scope,
+      totalTasks: totals.get(scope.id) ?? 0,
+      tasksCompleted: completed.get(scope.id) ?? 0,
+      tasksFailed: failed.get(scope.id) ?? 0,
+    }));
 }
 
 export function createParallelRunSummary(params: {
@@ -513,6 +596,7 @@ export function createParallelRunSummary(params: {
     originalBranch,
     returnToOriginalBranchError,
     preservedRecoveryWorktrees: preservedRecoveryWorktrees.map((info) => ({ ...info })),
+    scopeSummaries: buildParallelScopeSummaries(executorState),
   };
 }
 
@@ -536,6 +620,17 @@ export function formatParallelRunSummary(summary: ParallelRunSummary): string {
   lines.push(
     `  Tasks:                  ${summary.tasksCompleted}/${summary.totalTasks} completed (${summary.tasksFailed} failed)`
   );
+  if (summary.scopeSummaries.length > 0) {
+    lines.push('  Scopes:');
+    for (const scopeSummary of summary.scopeSummaries) {
+      const failedText = scopeSummary.tasksFailed > 0
+        ? ` (${scopeSummary.tasksFailed} failed)`
+        : '';
+      lines.push(
+        `    - ${scopeSummary.scope.title}: ${scopeSummary.tasksCompleted}/${scopeSummary.totalTasks} completed${failedText}`
+      );
+    }
+  }
   lines.push(`  Merges completed:       ${summary.mergesCompleted}`);
   lines.push(`  Conflicts resolved:     ${summary.conflictsResolved}`);
   if (summary.directMerge) {
@@ -786,6 +881,15 @@ interface ExtendedRuntimeOptions extends RuntimeOptions {
   remoteOnly?: boolean;
 }
 
+function addEpicIdOption(options: ExtendedRuntimeOptions, epicId: string): void {
+  const trimmed = epicId.trim();
+  if (!trimmed) return;
+  const current = options.epicIds ?? (options.epicId ? [options.epicId] : []);
+  const nextEpicIds = current.includes(trimmed) ? current : [...current, trimmed];
+  options.epicIds = nextEpicIds;
+  options.epicId = nextEpicIds[0];
+}
+
 /**
  * Parse CLI arguments for the run command
  */
@@ -811,7 +915,16 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
     switch (arg) {
       case '--epic':
         if (nextArg && !nextArg.startsWith('-')) {
-          options.epicId = nextArg;
+          addEpicIdOption(options, nextArg);
+          i++;
+        }
+        break;
+
+      case '--epics':
+        if (nextArg && !nextArg.startsWith('-')) {
+          for (const epicId of nextArg.split(',')) {
+            addEpicIdOption(options, epicId);
+          }
           i++;
         }
         break;
@@ -1066,7 +1179,8 @@ ralph-tui run - Start Ralph execution
 Usage: ralph-tui run [options]
 
 Options:
-  --epic <id>         Epic/parent issue ID for beads or linear tracker
+  --epic <id>         Epic/parent issue ID for beads or linear tracker (repeatable)
+  --epics <ids>       Comma-separated epic/parent IDs for one multi-epic session
   --prd <path>        PRD file path (auto-switches to json tracker)
   --agent <name>      Override agent plugin (e.g., claude, opencode)
   --model <name>      Override model (e.g., opus, sonnet)
@@ -1120,6 +1234,8 @@ Log Output Format (--no-tui mode):
 Examples:
   ralph-tui run                              # Start with defaults
   ralph-tui run --epic ralph-tui-45r         # Run with specific epic
+  ralph-tui run --parallel --epic ui-epic --epic backend-epic
+  ralph-tui run --parallel --epics ui-epic,backend-epic
   ralph-tui run --prd ./prd.json             # Run with PRD file
   ralph-tui run --agent claude --model opus  # Override agent settings
   ralph-tui run --tracker beads-bv           # Use beads-bv tracker
@@ -1497,7 +1613,7 @@ async function promptResumeOrNew(cwd: string): Promise<'resume' | 'new' | 'abort
  */
 async function showEpicSelectionTui(
   tracker: TrackerPlugin
-): Promise<TrackerTask | undefined> {
+): Promise<TrackerTask[] | undefined> {
   return new Promise(async (resolve) => {
     const renderer = await createCliRenderer({
       exitOnCtrlC: false,
@@ -1509,9 +1625,9 @@ async function showEpicSelectionTui(
       renderer.destroy();
     };
 
-    const handleEpicSelected = (epic: TrackerTask) => {
+    const handleEpicSelected = (epics: TrackerTask[]) => {
       cleanup();
-      resolve(epic);
+      resolve(epics);
     };
 
     const handleQuit = () => {
@@ -1535,6 +1651,40 @@ async function showEpicSelectionTui(
       />
     );
   });
+}
+
+async function resolveExecutionScopes(
+  tracker: TrackerPlugin,
+  epicIds: string[]
+): Promise<ExecutionScope[]> {
+  if (epicIds.length === 0) {
+    return [];
+  }
+
+  let epics: TrackerTask[] = [];
+  try {
+    epics = await tracker.getEpics();
+  } catch {
+    epics = [];
+  }
+
+  return epicIds.map((epicId) => {
+    const epic = epics.find((candidate) => candidate.id === epicId);
+    return epic
+      ? createExecutionScopeFromTask(epic)
+      : {
+          id: epicId,
+          title: epicId,
+          type: 'epic',
+        };
+  });
+}
+
+function wrapTrackerForScopes(
+  tracker: TrackerPlugin,
+  scopes: ExecutionScope[]
+): TrackerPlugin {
+  return scopes.length > 1 ? new MultiScopeTrackerPlugin(tracker, scopes) : tracker;
 }
 
 /**
@@ -1561,6 +1711,8 @@ interface RunAppWrapperProps {
   agentCommand?: string;
   /** Current epic ID for highlighting */
   currentEpicId?: string;
+  /** Selected execution scopes for multi-epic sessions */
+  executionScopes?: ExecutionScope[];
   /** Initial subagent panel visibility (from persisted session) */
   initialSubagentPanelVisible?: boolean;
   /** Callback to update persisted session state */
@@ -1658,6 +1810,7 @@ function RunAppWrapper({
   agentPlugin,
   agentCommand,
   currentEpicId: initialEpicId,
+  executionScopes,
   initialSubagentPanelVisible = false,
   onUpdatePersistedState,
   currentModel,
@@ -1882,6 +2035,7 @@ function RunAppWrapper({
       agentPlugin={agentPlugin}
       agentCommand={agentCommand}
       currentEpicId={currentEpicId}
+      executionScopes={executionScopes}
       initialSubagentPanelVisible={initialSubagentPanelVisible}
       onSubagentPanelVisibilityChange={handleSubagentPanelVisibilityChange}
       currentModel={currentModel}
@@ -1957,7 +2111,8 @@ async function runWithTui(
   config: RalphConfig,
   initialTasks: TrackerTask[],
   storedConfig?: StoredConfig,
-  notificationOptions?: NotificationRunOptions
+  notificationOptions?: NotificationRunOptions,
+  executionScopes: ExecutionScope[] = []
 ): Promise<PersistedSessionState> {
   let currentState = persistedState;
   // Track when engine starts for duration calculation
@@ -2203,6 +2358,7 @@ async function runWithTui(
       agentPlugin={config.agent.plugin}
       agentCommand={config.agent.command}
       currentEpicId={config.epicId}
+      executionScopes={executionScopes}
       initialSubagentPanelVisible={persistedState.subagentPanelVisible ?? false}
       onUpdatePersistedState={handleUpdatePersistedState}
       currentModel={config.model}
@@ -2367,6 +2523,7 @@ async function runParallelWithTui(
   directMerge: boolean,
   storedConfig?: StoredConfig,
   tracker?: TrackerPlugin,
+  executionScopes: ExecutionScope[] = [],
 ): Promise<ParallelTuiRunResult> {
   let currentState = persistedState;
   let resolveQuitPromise: (() => void) | null = null;
@@ -2844,6 +3001,7 @@ async function runParallelWithTui(
         agentPlugin={config.agent.plugin}
         agentCommand={config.agent.command}
         currentEpicId={config.epicId}
+        executionScopes={executionScopes}
         currentModel={config.model}
         sandboxConfig={config.sandbox}
         resolvedSandboxMode={resolvedSandboxMode}
@@ -3487,6 +3645,9 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     }
   }
 
+  let executionScopes: ExecutionScope[] = [];
+  let trackerForRun: TrackerPlugin | undefined;
+
   // If using beads tracker without epic, show epic selection TUI
   const isBeadsTracker = config.tracker.plugin === 'beads' || config.tracker.plugin === 'beads-bv' || config.tracker.plugin === 'beads-rust';
   if (isBeadsTracker && !config.epicId && config.showTui) {
@@ -3495,26 +3656,36 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     // Get tracker instance for epic selection
     const trackerRegistry = getTrackerRegistry();
     const tracker = await trackerRegistry.getInstance(config.tracker);
+    trackerForRun = tracker;
 
     // Show epic selection TUI
-    const selectedEpic = await showEpicSelectionTui(tracker);
+    const selectedEpics = await showEpicSelectionTui(tracker);
 
-    if (!selectedEpic) {
+    if (!selectedEpics || selectedEpics.length === 0) {
       console.log('Epic selection cancelled.');
       process.exit(0);
     }
 
-    // Update config with selected epic
-    config.epicId = selectedEpic.id;
-    config.tracker.options.epicId = selectedEpic.id;
+    // Update config with selected epic(s)
+    config.epicIds = selectedEpics.map((epic) => epic.id);
+    config.epicId = config.epicIds[0];
+    config.tracker.options.epicId = config.epicId;
+    config.tracker.options.epicIds = config.epicIds;
+    executionScopes = selectedEpics.map(createExecutionScopeFromTask);
 
     // If the tracker has a setEpicId method, call it
     if (tracker.setEpicId) {
-      tracker.setEpicId(selectedEpic.id);
+      tracker.setEpicId(config.epicId);
     }
 
-    console.log(`Selected epic: ${selectedEpic.id} - ${selectedEpic.title}`);
+    console.log(`Selected epic${selectedEpics.length > 1 ? 's' : ''}: ${config.epicIds.join(', ')}`);
     console.log('');
+  }
+
+  if (config.epicIds && config.epicIds.length > 0 && executionScopes.length === 0) {
+    const trackerRegistry = getTrackerRegistry();
+    trackerForRun = trackerForRun ?? await trackerRegistry.getInstance(config.tracker);
+    executionScopes = await resolveExecutionScopes(trackerForRun, config.epicIds);
   }
 
   // Detect and recover stale sessions EARLY (before any prompts)
@@ -3578,6 +3749,13 @@ export async function executeRunCommand(args: string[]): Promise<void> {
       cleanupLockHandlers();
       process.exit(1);
     }
+    if (!config.epicIds && session.epicIds && session.epicIds.length > 0) {
+      config.epicIds = session.epicIds;
+      config.epicId = session.epicId ?? session.epicIds[0];
+      config.tracker.options.epicId = config.epicId;
+      config.tracker.options.epicIds = config.epicIds;
+      executionScopes = session.executionScopes ?? executionScopes;
+    }
   } else {
     // Create new session (task count will be updated after tracker init)
     // Note: Lock already acquired above, so createSession won't re-acquire
@@ -3590,6 +3768,8 @@ export async function executeRunCommand(args: string[]): Promise<void> {
       agentPlugin: config.agent.plugin,
       trackerPlugin: config.tracker.plugin,
       epicId: config.epicId,
+      epicIds: config.epicIds,
+      executionScopes,
       prdPath: config.prdPath,
       maxIterations: config.maxIterations,
       totalTasks: 0, // Will be updated
@@ -3605,7 +3785,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   console.log(`Agent: ${config.agent.plugin}`);
   console.log(`Tracker: ${config.tracker.plugin}`);
   if (config.epicId) {
-    console.log(`Epic: ${config.epicId}`);
+    console.log(`Epic${config.epicIds && config.epicIds.length > 1 ? 's' : ''}: ${config.epicIds?.join(', ') ?? config.epicId}`);
   }
   if (config.prdPath) {
     console.log(`PRD: ${config.prdPath}`);
@@ -3613,16 +3793,19 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   console.log(`Max iterations: ${config.maxIterations || 'unlimited'}`);
   console.log('');
 
-  // Create and initialize engine
-  const engine = new ExecutionEngine(config);
-
   let tasks: TrackerTask[] = [];
   let tracker: TrackerPlugin;
+  const trackerRegistry = getTrackerRegistry();
+  const baseTracker = trackerForRun ?? await trackerRegistry.getInstance(config.tracker);
+  if (config.epicIds && config.epicIds.length > 0 && executionScopes.length === 0) {
+    executionScopes = await resolveExecutionScopes(baseTracker, config.epicIds);
+  }
+  tracker = wrapTrackerForScopes(baseTracker, executionScopes);
+
+  // Create and initialize engine
+  const engine = new ExecutionEngine(config);
   try {
-    await engine.initialize();
-    // Get tasks for persisted state
-    const trackerRegistry = getTrackerRegistry();
-    tracker = await trackerRegistry.getInstance(config.tracker);
+    await engine.initialize(undefined, { tracker });
 
     // Detect and handle stale in_progress tasks from crashed sessions
     // This must happen before we fetch tasks, so they reflect any resets
@@ -3767,6 +3950,8 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     model: config.model,
     trackerPlugin: config.tracker.plugin,
     epicId: config.epicId,
+    epicIds: config.epicIds,
+    executionScopes,
     prdPath: config.prdPath,
     maxIterations: config.maxIterations,
     tasks,
@@ -3786,6 +3971,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     agentPlugin: config.agent.plugin,
     trackerPlugin: config.tracker.plugin,
     epicId: config.epicId,
+    epicIds: config.epicIds,
     prdPath: config.prdPath,
     sandbox: config.sandbox?.enabled,
   });
@@ -3908,6 +4094,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         directMerge,
         sessionBranchName: targetBranch,
         filteredTaskIds,
+        scopes: executionScopes,
       });
 
       // Wire up AI conflict resolution if enabled (default: true)
@@ -3946,7 +4133,14 @@ export async function executeRunCommand(args: string[]): Promise<void> {
       if (config.showTui) {
         // Parallel TUI mode — visualize workers, merges, and conflicts
         const parallelTuiResult = await runParallelWithTui(
-          parallelExecutor, persistedState, config, tasks, directMerge, storedConfig, tracker
+          parallelExecutor,
+          persistedState,
+          config,
+          tasks,
+          directMerge,
+          storedConfig,
+          tracker,
+          executionScopes
         );
         persistedState = parallelTuiResult.state;
         parallelSummaryForGuidance = parallelTuiResult.summary;
@@ -4204,7 +4398,15 @@ export async function executeRunCommand(args: string[]): Promise<void> {
       // Sequential TUI mode (existing path)
       // Pass tasks for initial TUI display in "ready" state
       // Also pass storedConfig for settings view
-      persistedState = await runWithTui(engine, persistedState, config, tasks, storedConfig, notificationRunOptions);
+      persistedState = await runWithTui(
+        engine,
+        persistedState,
+        config,
+        tasks,
+        storedConfig,
+        notificationRunOptions,
+        executionScopes
+      );
     } else {
       // Sequential headless mode (existing path)
       persistedState = await runHeadless(engine, persistedState, config, {

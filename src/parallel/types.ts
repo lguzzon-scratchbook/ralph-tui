@@ -4,7 +4,11 @@
  * task graph analysis, and parallel session persistence types.
  */
 
-import type { TrackerTask, TaskPriority } from '../plugins/trackers/types.js';
+import type {
+  ExecutionScope,
+  TrackerTask,
+  TaskPriority,
+} from '../plugins/trackers/types.js';
 
 // ─── Worker Types ──────────────────────────────────────────────────────────────
 
@@ -336,6 +340,9 @@ export interface ParallelExecutorConfig {
    * Used for --task-range filtering.
    */
   filteredTaskIds?: string[];
+
+  /** Selected execution scopes for multi-epic runs */
+  scopes?: ExecutionScope[];
 }
 
 /**
@@ -398,6 +405,9 @@ export interface ParallelExecutorState {
 
   /** Elapsed time in milliseconds */
   elapsedMs: number;
+
+  /** Selected execution scopes for this run */
+  scopes?: ExecutionScope[];
 }
 
 // ─── Session Persistence Types ─────────────────────────────────────────────────
