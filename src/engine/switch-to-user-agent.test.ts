@@ -114,6 +114,10 @@ describe('ExecutionEngine.switchToUserAgent', () => {
     );
 
     const config = (engine as unknown as { config: RalphConfig }).config;
+    const switchBuffers = engine as unknown as {
+      currentIterationAgentSwitches: unknown[];
+      nextIterationAgentSwitches: Array<{ reason: string }>;
+    };
     expect(config.agent.plugin).toBe('switch-target');
     expect(config.model).toBe('valid-model');
     expect(engine.getState().activeAgent).toMatchObject({
@@ -122,6 +126,76 @@ describe('ExecutionEngine.switchToUserAgent', () => {
     });
     expect(engine.getState().currentModel).toBe('valid-model');
     expect(events).toEqual(['switch-primary:switch-target:user-selected']);
+    expect(switchBuffers.currentIterationAgentSwitches).toHaveLength(0);
+    expect(switchBuffers.nextIterationAgentSwitches).toEqual([
+      expect.objectContaining({ reason: 'user-selected' }),
+    ]);
+  });
+
+  test('clears model override without validating an empty string', async () => {
+    if (!registryUsable) return;
+    const validatedModels: string[] = [];
+    registerTestAgent('switch-clear-primary');
+    registerTestAgent('switch-clear-target', {
+      validateModel: (model) => {
+        validatedModels.push(model);
+        return model === '' ? 'empty model rejected' : null;
+      },
+    });
+    const engine = new ExecutionEngine(createConfig('switch-clear-primary'));
+
+    await engine.switchToUserAgent(
+      { name: 'switch-clear-target', plugin: 'switch-clear-target', options: {} },
+      undefined
+    );
+
+    const config = (engine as unknown as { config: RalphConfig }).config;
+    expect(config.agent.plugin).toBe('switch-clear-target');
+    expect(config.model).toBeUndefined();
+    expect(validatedModels).toEqual([]);
+  });
+
+  test('queues a user switch while an execution is active', async () => {
+    if (!registryUsable) return;
+    registerTestAgent('switch-queued-primary');
+    registerTestAgent('switch-queued-target');
+    const engine = new ExecutionEngine(createConfig('switch-queued-primary'));
+    const internals = engine as unknown as {
+      currentExecution: unknown;
+      pendingUserAgentSwap: unknown;
+      applyPendingUserAgentSwap: () => void;
+      config: RalphConfig;
+      currentIterationAgentSwitches: unknown[];
+      nextIterationAgentSwitches: Array<{ reason: string }>;
+    };
+    const events: string[] = [];
+    engine.on((event) => {
+      if (event.type === 'agent:switched') {
+        events.push(`${event.previousAgent}:${event.newAgent}:${event.reason}`);
+      }
+    });
+    internals.currentExecution = { interrupt: () => {}, promise: Promise.resolve() };
+
+    await engine.switchToUserAgent(
+      { name: 'switch-queued-target', plugin: 'switch-queued-target', options: {} },
+      'queued-model'
+    );
+
+    expect(internals.config.agent.plugin).toBe('switch-queued-primary');
+    expect(internals.config.model).toBeUndefined();
+    expect(events).toEqual([]);
+    expect(internals.pendingUserAgentSwap).not.toBeNull();
+
+    internals.currentExecution = null;
+    internals.applyPendingUserAgentSwap();
+
+    expect(internals.config.agent.plugin).toBe('switch-queued-target');
+    expect(internals.config.model).toBe('queued-model');
+    expect(events).toEqual(['switch-queued-primary:switch-queued-target:user-selected']);
+    expect(internals.currentIterationAgentSwitches).toHaveLength(0);
+    expect(internals.nextIterationAgentSwitches).toEqual([
+      expect.objectContaining({ reason: 'user-selected' }),
+    ]);
   });
 
   test('throws on invalid model without mutating state', async () => {

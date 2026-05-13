@@ -79,6 +79,14 @@ const PRIMARY_RECOVERY_TEST_TIMEOUT_MS = 5000;
  */
 const PRIMARY_RECOVERY_TEST_PROMPT = 'Reply with just the word "ok".';
 
+interface PendingUserAgentSwap {
+  agentConfig: AgentPluginConfig;
+  agent: AgentPlugin;
+  model: string | undefined;
+  rateLimitConfig: Required<RateLimitHandlingConfig>;
+  previousAgent: string;
+}
+
 /**
  * Maximum characters kept for live stdout/stderr buffers in engine state.
  * These buffers are for UI/remote progress display and should stay bounded.
@@ -247,6 +255,10 @@ export class ExecutionEngine {
   private primaryAgentInstance: AgentPlugin | null = null;
   /** Track agent switches during the current iteration for logging */
   private currentIterationAgentSwitches: AgentSwitchEntry[] = [];
+  /** Agent switches to carry into the next iteration after its reset */
+  private nextIterationAgentSwitches: AgentSwitchEntry[] = [];
+  /** User-requested agent swap waiting for the active execution to finish */
+  private pendingUserAgentSwap: PendingUserAgentSwap | null = null;
   /** Forced task for worker mode — engine only works on this one task */
   private forcedTask: TrackerTask | null = null;
   /** Track if the forced task has been processed (prevents infinite loop on skip/fail) */
@@ -934,7 +946,8 @@ export class ExecutionEngine {
     this.subagentParser.reset();
 
     // Reset agent switch tracking for this iteration
-    this.currentIterationAgentSwitches = [];
+    this.currentIterationAgentSwitches = this.nextIterationAgentSwitches;
+    this.nextIterationAgentSwitches = [];
 
     const startedAt = new Date();
     const iteration = this.state.currentIteration;
@@ -1443,6 +1456,8 @@ export class ExecutionEngine {
           // Ignore cleanup errors for temporary files
         });
       }
+      this.currentExecution = null;
+      this.applyPendingUserAgentSwap();
       this.state.currentTask = null;
     }
   }
@@ -1869,7 +1884,8 @@ export class ExecutionEngine {
   private switchAgent(
     newAgentPlugin: string,
     reason: ActiveAgentReason,
-    previousAgentOverride?: string
+    previousAgentOverride?: string,
+    recordForNextIteration = false
   ): void {
     const previousAgent =
       previousAgentOverride ?? this.state.activeAgent?.plugin ?? this.config.agent.plugin;
@@ -1908,7 +1924,11 @@ export class ExecutionEngine {
       to: newAgentPlugin,
       reason,
     };
-    this.currentIterationAgentSwitches.push(switchEntry);
+    if (recordForNextIteration) {
+      this.nextIterationAgentSwitches.push(switchEntry);
+    } else {
+      this.currentIterationAgentSwitches.push(switchEntry);
+    }
 
     // Log the switch to console for visibility
     if (reason === 'fallback') {
@@ -2125,30 +2145,59 @@ export class ExecutionEngine {
       if (modelError) {
         throw new Error(modelError);
       }
-    } else {
-      const modelError = newInstance.validateModel('');
-      if (modelError) {
-        throw new Error(modelError);
-      }
     }
 
     const previousAgent = this.state.activeAgent?.plugin ?? this.config.agent.plugin;
+    const swap: PendingUserAgentSwap = {
+      agentConfig,
+      agent: newInstance,
+      model: normalizedModel,
+      rateLimitConfig: {
+        ...DEFAULT_RATE_LIMIT_HANDLING,
+        ...agentConfig.rateLimitHandling,
+      },
+      previousAgent,
+    };
 
+    if (this.currentExecution || this.state.currentTask) {
+      this.pendingUserAgentSwap = swap;
+      return;
+    }
+
+    this.applyUserAgentSwap(swap, true);
+  }
+
+  private applyUserAgentSwap(
+    swap: PendingUserAgentSwap,
+    recordForNextIteration: boolean
+  ): void {
     this.config.agent = {
-      ...agentConfig,
-      options: { ...agentConfig.options },
+      ...swap.agentConfig,
+      options: { ...swap.agentConfig.options },
     };
-    this.config.model = normalizedModel;
-    this.rateLimitConfig = {
-      ...DEFAULT_RATE_LIMIT_HANDLING,
-      ...this.config.agent.rateLimitHandling,
-    };
-    this.agent = newInstance;
-    this.primaryAgentInstance = newInstance;
+    this.config.model = swap.model;
+    this.rateLimitConfig = swap.rateLimitConfig;
+    this.agent = swap.agent;
+    this.primaryAgentInstance = swap.agent;
     this.rateLimitedAgents.clear();
-    this.state.currentModel = normalizedModel;
+    this.state.currentModel = swap.model;
 
-    this.switchAgent(agentConfig.plugin, 'user-selected', previousAgent);
+    this.switchAgent(
+      swap.agentConfig.plugin,
+      'user-selected',
+      swap.previousAgent,
+      recordForNextIteration
+    );
+  }
+
+  private applyPendingUserAgentSwap(): void {
+    if (!this.pendingUserAgentSwap) {
+      return;
+    }
+
+    const swap = this.pendingUserAgentSwap;
+    this.pendingUserAgentSwap = null;
+    this.applyUserAgentSwap(swap, true);
   }
 
   /**
