@@ -74,7 +74,7 @@ import { ParallelExecutor, analyzeTaskGraph, shouldRunParallel } from '../parall
 import type { ParallelEvent } from '../parallel/events.js';
 import type { ParallelExecutorState } from '../parallel/types.js';
 
-async function resolveExecutionScopes(
+export async function resolveExecutionScopes(
   tracker: TrackerPlugin,
   epicIds: string[]
 ): Promise<ExecutionScope[]> {
@@ -133,7 +133,7 @@ function createRemoteScopeCount(scopeId: string): RemoteScopeCount {
   };
 }
 
-function buildRemoteScopeCounts(
+export function buildRemoteScopeCounts(
   executorState: ParallelExecutorState
 ): RemoteScopeCount[] | undefined {
   if (!executorState.scopes || executorState.scopes.length <= 1) {

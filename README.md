@@ -165,6 +165,8 @@ ralph-tui create-prd --output ./docs
 | `e` | Edit current remote (when viewing remote tab) |
 | `x` | Delete current remote (when viewing remote tab) |
 
+**Multi-epic sessions:** Repeated `--epic` and comma-separated `--epics` create one Ralph session across all selected hierarchy-tracker epics. Ralph uses one scheduler, one repo lock, one session branch, one merge queue, and task-scoped worktrees. The TUI scope filter (`g`/`G`) is only a local view filter over that session.
+
 **Dashboard (`d` key):** Toggle a status panel showing:
 - Current execution status and active task
 - Agent name and model (e.g., `claude-code`, `anthropic/claude-sonnet`)

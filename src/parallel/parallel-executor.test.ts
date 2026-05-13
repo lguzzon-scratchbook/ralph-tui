@@ -9,7 +9,7 @@
 import { describe, test, expect } from 'bun:test';
 import { analyzeTaskGraph, shouldRunParallel } from './task-graph.js';
 import { ParallelExecutor } from './index.js';
-import type { TrackerTask, TrackerPlugin } from '../plugins/trackers/types.js';
+import type { ExecutionScope, TrackerTask, TrackerPlugin } from '../plugins/trackers/types.js';
 import type { RalphConfig } from '../config/types.js';
 import type { ParallelEvent } from './events.js';
 import type { AiResolverCallback } from './conflict-resolver.js';
@@ -340,6 +340,18 @@ describe('ParallelExecutor class', () => {
       expect(state.totalTasks).toBe(0);
       expect(state.startedAt).toBeNull();
       expect(state.elapsedMs).toBe(0);
+    });
+
+    test('includes configured execution scopes', () => {
+      const scopes: ExecutionScope[] = [
+        { id: 'ui', title: 'UI', type: 'epic' },
+        { id: 'backend', title: 'Backend', type: 'epic' },
+      ];
+      const executor = new ParallelExecutor(createMockConfig(), createMockTracker(), {
+        scopes,
+      });
+
+      expect(executor.getState().scopes).toEqual(scopes);
     });
   });
 

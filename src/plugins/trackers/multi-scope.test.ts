@@ -6,7 +6,10 @@
 import { describe, expect, test } from 'bun:test';
 import { analyzeTaskGraph } from '../../parallel/task-graph.js';
 import { BaseTrackerPlugin } from './base.js';
-import { MultiScopeTrackerPlugin } from './multi-scope.js';
+import {
+  MultiScopeTrackerPlugin,
+  createExecutionScopeFromTask,
+} from './multi-scope.js';
 import type {
   ExecutionScope,
   SetupQuestion,
@@ -117,6 +120,29 @@ class MockTracker extends BaseTrackerPlugin {
 }
 
 describe('MultiScopeTrackerPlugin', () => {
+  test('creates execution scopes from tracker parent tasks and returns defensive scope copies', () => {
+    const epicTask = task('epic-1', '', {
+      title: 'Feature Epic',
+      type: 'epic',
+      description: 'Build the feature',
+      metadata: { owner: 'team-a' },
+    });
+
+    expect(createExecutionScopeFromTask(epicTask)).toEqual({
+      id: 'epic-1',
+      title: 'Feature Epic',
+      type: 'epic',
+      description: 'Build the feature',
+      metadata: { owner: 'team-a' },
+    });
+
+    const tracker = new MultiScopeTrackerPlugin(new MockTracker([]), scopes);
+    const returnedScopes = tracker.getScopes();
+    returnedScopes[0].title = 'Changed';
+
+    expect(tracker.getScopes()[0].title).toBe('UI');
+  });
+
   test('combines scoped tasks, annotates them, and deduplicates duplicate IDs', async () => {
     const originalWarn = console.warn;
     const warnings: string[] = [];
